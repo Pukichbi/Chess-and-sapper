@@ -1,0 +1,88 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Prepare Capacitor project
+        env:
+          SERVER_URL: ${{ vars.SERVER_URL }}
+        run: |
+          if [ -z "$SERVER_URL" ]; then echo "::error::Не задана переменная SERVER_URL (Settings → Secrets and variables → Actions → Variables). Укажи адрес сервера, например https://shakhmat-saper.onrender.com"; exit 1; fi
+          mkdir -p www assets
+          cp index.html www/index.html
+          [ -f icon.png ] || base64 -d icon-base64.txt > icon.png
+          cp icon.png www/icon.png
+          printf "window.SERVER_URL=%s;\n" "$(node -p 'JSON.stringify(process.env.SERVER_URL.trim().replace(/\/+$/,""))')" > www/server-config.js
+          cat www/server-config.js
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.shakhmatsaper.game",
+            "appName": "Шахмат и сапёр",
+            "webDir": "www",
+            "server": { "androidScheme": "https" }
+          }
+          EOF
+          npm init -y
+          npm install --save @capacitor/core@^6.2.0 @capacitor/cli@^6.2.0 @capacitor/android@^6.2.0
+          npm install --save-dev @capacitor/assets@^3.0.5 sharp@^0.33.5
+
+      - name: Make icon files
+        run: |
+          cat > make-icons.js <<'EOF'
+          const sharp = require('sharp');
+          (async () => {
+            await sharp('icon.png').resize(1024, 1024).png().toFile('assets/icon-only.png');
+            const fg = await sharp('icon.png').resize(640, 640).png().toBuffer();
+            await sharp({ create: { width: 1024, height: 1024, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } })
+              .composite([{ input: fg, left: 192, top: 192 }]).png().toFile('assets/icon-foreground.png');
+            await sharp('icon.png').resize(1024, 1024).blur(40).png().toFile('assets/icon-background.png');
+          })();
+          EOF
+          node make-icons.js
+
+      - name: Add Android platform and icons
+        run: |
+          npx cap add android
+          npx capacitor-assets generate --android
+          npx cap sync android
+
+      - name: Build debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk Shakhmat-i-saper.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Shakhmat-i-saper-apk
+          path: Shakhmat-i-saper.apk
+
+      - name: Publish APK to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Шахмат и сапёр 1.0.${{ github.run_number }}
+          files: Shakhmat-i-saper.apk
